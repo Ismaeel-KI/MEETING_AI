@@ -8,13 +8,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   startTranscriptCapture: () => ipcRenderer.invoke("start-transcript-capture"),
   stopTranscriptCapture: () => ipcRenderer.invoke("stop-transcript-capture"),
+
+  sendAudioForAnalysis: (audioBuffer) => ipcRenderer.invoke("send-audio-for-analysis", audioBuffer),
+
   processAISummary: (transcript) => ipcRenderer.invoke("process-ai-summary", transcript),
 
-  // Notion integration
   exportToNotion: (config, data) => ipcRenderer.invoke("export-to-notion", config, data),
   fetchNotionDatabases: (apiKey) => ipcRenderer.invoke("fetch-notion-databases", apiKey),
 
-  // Meeting platform integrations
   onTranscriptUpdate: (callback) => ipcRenderer.on("transcript-update", callback),
   onMeetingStatusChange: (callback) => ipcRenderer.on("meeting-status-change", callback),
 })
