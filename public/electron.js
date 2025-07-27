@@ -1,6 +1,9 @@
 const { app, BrowserWindow, ipcMain } = require("electron")
 const path = require("path")
 const isDev = require("electron-is-dev")
+const fs = require('fs');
+const fetch = require('node-fetch').default;
+const FormData = require('form-data');
 
 let mainWindow
 
@@ -53,142 +56,118 @@ app.on("activate", () => {
 })
 
 ipcMain.on("minimize", () => mainWindow.minimize());
+ipcMain.on("maximize", () => mainWindow.maximize());
+ipcMain.on("close", () => app.quit());
 
-ipcMain.on("maximize", () => {
-  if (mainWindow.isMaximized()) {
-    mainWindow.unmaximize();
-  } else {
-    mainWindow.maximize();
+
+ipcMain.handle("start-transcript-capture", async () => {
+    console.log("Main process received start-transcript-capture");
+    return { success: true };
+});
+
+ipcMain.handle("stop-transcript-capture", async () => {
+    console.log("Main process received stop-transcript-capture");
+    return { success: true };
+});
+
+ipcMain.handle("send-audio-for-analysis", async (event, arrayBuffer) => {
+  console.log('Received audio data in main process for analysis.');
+
+  const audioBuffer = Buffer.from(arrayBuffer);
+
+  if (audioBuffer.length === 0) {
+    console.warn('No audio data received.');
+    return { success: false, error: 'No audio data recorded.' };
+  }
+
+  const tempFilePath = path.join(app.getPath('temp'), `recording_${Date.now()}.webm`);
+  
+  try {
+    fs.writeFileSync(tempFilePath, audioBuffer);
+    console.log(`Audio saved temporarily to ${tempFilePath}`);
+
+    const form = new FormData();
+    form.append('audio_file', fs.createReadStream(tempFilePath), {
+      filename: 'recording.webm',
+      contentType: 'audio/webm',
+    });
+
+    const response = await fetch('http://127.0.0.1:8000/analyze', {
+      method: 'POST',
+      body: form,
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      console.log('Backend analysis successful:', result);
+      return { success: true, summary: result.summary, action_items: result.action_items, transcript: result.transcript };
+    } else {
+      const errorText = await response.text();
+      console.error('Backend analysis failed:', response.status, errorText);
+      return { success: false, error: `Analysis failed: ${response.status} - ${errorText}` };
+    }
+  } catch (error) {
+    console.error('Error sending audio to backend:', error);
+    return { success: false, error: `Error during audio processing or sending: ${error.message}` };
+  } finally {
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+      console.log(`Temporary file deleted: ${tempFilePath}`);
+    }
   }
 });
 
-ipcMain.on("close", () => mainWindow.close());
-
-// IPC handlers for meeting platform integration
-ipcMain.handle("start-transcript-capture", async () => {
-  // Integration with meeting platforms would go here
-  // This would connect to Google Meet, Zoom, etc. APIs
-  return { success: true }
-})
-
-ipcMain.handle("stop-transcript-capture", async () => {
-  return { success: true }
-})
-
 ipcMain.handle("process-ai-summary", async (event, transcript) => {
-  // This would call your backend AI summary API
-  return {
-    summary: "AI-generated summary would be returned here",
-    tasks: [],
-  }
-})
+  console.log("Main process received text transcript for AI summary.");
+  try {
+    const response = await fetch("http://127.0.0.1:8000/analyze", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text: transcript }),
+    });
 
-// Add this after the existing IPC handlers
+    if (response.ok) {
+      const result = await response.json();
+      console.log("Text analysis result:", result);
+      return { success: true, summary: result.summary, action_items: result.action_items, transcript: result.transcript };
+    } else {
+      const errorText = await response.text();
+      console.error("Text analysis failed:", response.status, errorText);
+      return { success: false, error: `Text analysis failed: ${response.status} - ${errorText}` };
+    }
+  } catch (error) {
+    console.error("Error processing AI summary (text):", error);
+    return { success: false, error: error.message };
+  }
+});
+
+
 ipcMain.handle("export-to-notion", async (event, config, data) => {
   try {
     const { Client } = require("@notionhq/client")
 
-    const notion = new Client({
-      auth: config.apiKey,
-    })
+    const notion = new Client({ auth: config.apiKey })
+    const pageId = config.databaseId
 
-    // Create a new page in the specified database
-    const response = await notion.pages.create({
-      parent: {
-        database_id: config.databaseId,
-      },
-      properties: {
-        Name: {
-          title: [
-            {
-              text: {
-                content: data.title,
-              },
-            },
-          ],
-        },
-        Status: {
-          select: {
-            name: "Completed",
-          },
-        },
-        Date: {
-          date: {
-            start: new Date().toISOString().split("T")[0],
-          },
-        },
-      },
+    const response = await notion.blocks.children.append({
+      block_id: pageId,
       children: [
         {
           object: "block",
           type: "heading_2",
           heading_2: {
-            rich_text: [
-              {
-                type: "text",
-                text: {
-                  content: "Meeting Summary",
-                },
-              },
-            ],
+            rich_text: [{ type: "text", text: { content: "Meeting Summary" } }],
           },
         },
         {
           object: "block",
           type: "paragraph",
           paragraph: {
-            rich_text: [
-              {
-                type: "text",
-                text: {
-                  content: `Duration: ${data.meetingDuration}`,
-                },
-              },
-            ],
+            rich_text: [{ type: "text", text: { content: data.summary } }],
           },
         },
-        {
-          object: "block",
-          type: "paragraph",
-          paragraph: {
-            rich_text: [
-              {
-                type: "text",
-                text: {
-                  content: `Participants: ${data.participants.join(", ")}`,
-                },
-              },
-            ],
-          },
-        },
-        {
-          object: "block",
-          type: "heading_3",
-          heading_3: {
-            rich_text: [
-              {
-                type: "text",
-                text: {
-                  content: "Key Points",
-                },
-              },
-            ],
-          },
-        },
-        ...data.summary.keyPoints.map((point) => ({
-          object: "block",
-          type: "bulleted_list_item",
-          bulleted_list_item: {
-            rich_text: [
-              {
-                type: "text",
-                text: {
-                  content: point,
-                },
-              },
-            ],
-          },
-        })),
         {
           object: "block",
           type: "heading_3",
@@ -211,22 +190,45 @@ ipcMain.handle("export-to-notion", async (event, config, data) => {
               {
                 type: "text",
                 text: {
-                  content: `${task.title} (Assigned to: ${task.assignee})`,
+                  content: `${task.title} (Assigned to: ${task.owner || "Unassigned"})${task.deadline ? ` (Deadline: ${task.deadline})` : ''}`,
                 },
               },
             ],
-            checked: task.completed,
+            checked: false,
           },
         })),
+        {
+          object: "block",
+          type: "heading_3",
+          heading_3: {
+            rich_text: [
+              {
+                type: "text",
+                text: {
+                  content: "Full Transcript",
+                },
+              },
+            ],
+          },
+        },
+        {
+          object: "block",
+          type: "paragraph",
+          paragraph: {
+            rich_text: [{ type: "text", text: { content: data.transcript || "No transcript available." } }],
+          },
+        },
       ],
-    })
+    });
 
-    return { success: true, pageId: response.id }
+    console.log("Notion export successful:", response);
+    return { success: true, pageId: response.id };
   } catch (error) {
-    console.error("Notion export error:", error)
-    return { success: false, error: error.message }
+    console.error("Notion export error:", error);
+    return { success: false, error: error.message || "An unknown error occurred during Notion export." };
   }
-})
+});
+
 
 ipcMain.handle("fetch-notion-databases", async (event, apiKey) => {
   try {
@@ -236,12 +238,14 @@ ipcMain.handle("fetch-notion-databases", async (event, apiKey) => {
       auth: apiKey,
     })
 
+    // >>> FIX STARTS HERE <<<
     const response = await notion.search({
       filter: {
         value: "database",
         property: "object",
-      },
-    })
+      }, // This comma is crucial
+    }); // This closing brace and parenthesis are crucial
+    // >>> FIX ENDS HERE <<<
 
     const databases = response.results.map((db) => ({
       id: db.id,
@@ -250,7 +254,7 @@ ipcMain.handle("fetch-notion-databases", async (event, apiKey) => {
 
     return { success: true, databases }
   } catch (error) {
-    console.error("Fetch databases error:", error)
+    console.error("Notion fetch databases error:", error)
     return { success: false, error: error.message }
   }
 })

@@ -61,11 +61,35 @@ interface Task {
   dueDate?: string
 }
 
-interface Summary {
-  keyPoints: string[]
-  decisions: string[]
-  nextSteps: string[]
-  participants: string[]
+// NOTE: The 'Summary' interface below is for a more structured AI output.
+// Your current backend provides a simple string summary.
+// For now, the 'summary' state will be a string to match backend output.
+// If you intend for the AI to return structured data for keyPoints, decisions, etc.,
+// your backend's AI model would need to be updated to provide that.
+// interface Summary {
+//   keyPoints: string[]
+//   decisions: string[]
+//   nextSteps: string[]
+//   participants: string[]
+// }
+
+// Extend the Window interface to include electronAPI
+declare global {
+  interface Window {
+    electronAPI: {
+      minimize: () => void
+      maximize: () => void
+      close: () => void
+      startTranscriptCapture: () => Promise<{ success: boolean }>
+      stopTranscriptCapture: () => Promise<{ success: boolean }>
+      sendAudioForAnalysis: (arrayBuffer: ArrayBuffer) => Promise<{ success: boolean; summary?: string; action_items?: any[]; transcript?: string; error?: string }>;
+      processAISummary: (transcript: string) => Promise<{ success: boolean; summary?: string; action_items?: any[]; transcript?: string; error?: string }>;
+      exportToNotion: (config: { apiKey: string; databaseId: string; pageTitle?: string; }, data: { summary: string; tasks: Task[]; transcript: string; meetingDuration?: string; participants?: string[] }) => Promise<{ success: boolean; pageId?: string; error?: string }>;
+      fetchNotionDatabases: (apiKey: string) => Promise<{ success: boolean; databases?: { id: string; title: string }[]; error?: string }>;
+      onTranscriptUpdate: (callback: (event: Electron.IpcRendererEvent, transcript: TranscriptEntry[]) => void) => void;
+      onMeetingStatusChange: (callback: (event: Electron.IpcRendererEvent, status: string) => void) => void;
+    }
+  }
 }
 
 export default function MeetingTranscriptApp() {
@@ -75,9 +99,10 @@ export default function MeetingTranscriptApp() {
   const [isRecording, setIsRecording] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
-  const [summary, setSummary] = useState<Summary | null>(null)
+  // Adjusted 'summary' state to be string to match current backend output
+  const [summary, setSummary] = useState<string | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
-  const [isProcessing, setIsProcessing] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false) // Renamed from isLoadingAnalysis for consistency with your code
   const [meetingDuration, setMeetingDuration] = useState(0)
   const [activeTab, setActiveTab] = useState("transcript")
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -91,82 +116,34 @@ export default function MeetingTranscriptApp() {
   const [isExportingToNotion, setIsExportingToNotion] = useState(false)
   const [notionDatabases, setNotionDatabases] = useState<Array<{ id: string; title: string }>>([])
 
+  // Refs for MediaRecorder
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+
+
   // Handle theme mounting
   useEffect(() => {
     setMounted(true)
   }, [])
 
-  // Mock data for demonstration
+  // Load Notion config from localStorage
   useEffect(() => {
-    const mockTranscript: TranscriptEntry[] = [
-      {
-        id: "1",
-        speaker: "John Smith",
-        text: "Good morning everyone, let's start with the quarterly review discussion.",
-        timestamp: "09:00:15",
-        confidence: 0.95,
-      },
-      {
-        id: "2",
-        speaker: "Sarah Johnson",
-        text: "Thanks John. I've prepared the analytics report showing a 23% increase in user engagement.",
-        timestamp: "09:00:32",
-        confidence: 0.92,
-      },
-      {
-        id: "3",
-        speaker: "Mike Chen",
-        text: "That's excellent news. We should focus on the mobile optimization project next quarter.",
-        timestamp: "09:01:05",
-        confidence: 0.88,
-      },
-    ]
-
-    const mockSummary: Summary = {
-      keyPoints: [
-        "Quarterly review shows 23% increase in user engagement",
-        "Mobile optimization identified as priority for next quarter",
-        "Analytics report demonstrates positive growth trends",
-      ],
-      decisions: [
-        "Proceed with mobile optimization project",
-        "Allocate additional resources to user engagement initiatives",
-      ],
-      nextSteps: ["Schedule mobile optimization planning session", "Review budget allocation for Q2 initiatives"],
-      participants: ["John Smith", "Sarah Johnson", "Mike Chen"],
+    const savedConfig = localStorage.getItem("notionConfig");
+    if (savedConfig) {
+      setNotionConfig(JSON.parse(savedConfig));
     }
+  }, []);
 
-    const mockTasks: Task[] = [
-      {
-        id: "1",
-        title: "Schedule mobile optimization planning session",
-        assignee: "John Smith",
-        priority: "high",
-        completed: false,
-        dueDate: "2024-02-15",
-      },
-      {
-        id: "2",
-        title: "Review budget allocation for Q2 initiatives",
-        assignee: "Sarah Johnson",
-        priority: "medium",
-        completed: false,
-        dueDate: "2024-02-20",
-      },
-      {
-        id: "3",
-        title: "Prepare mobile optimization proposal",
-        assignee: "Mike Chen",
-        priority: "high",
-        completed: false,
-        dueDate: "2024-02-18",
-      },
-    ]
+  // Save Notion config to localStorage whenever it changes
+  useEffect(() => {
+    if (notionConfig.apiKey && notionConfig.databaseId) {
+      localStorage.setItem("notionConfig", JSON.stringify(notionConfig));
+    } else {
+      localStorage.removeItem("notionConfig");
+    }
+  }, [notionConfig]);
 
-    setTranscript(mockTranscript)
-    setSummary(mockSummary)
-    setTasks(mockTasks)
-  }, [])
 
   // Auto-scroll to bottom of transcript
   useEffect(() => {
@@ -177,13 +154,17 @@ export default function MeetingTranscriptApp() {
 
   // Meeting timer
   useEffect(() => {
-    let interval: NodeJS.Timeout
+    let interval: NodeJS.Timeout | null = null; // Initialize to null
     if (isRecording && !isPaused) {
       interval = setInterval(() => {
         setMeetingDuration((prev) => prev + 1)
       }, 1000)
     }
-    return () => clearInterval(interval)
+    return () => {
+      if (interval) { // Clear if interval exists
+        clearInterval(interval);
+      }
+    }
   }, [isRecording, isPaused])
 
   const formatTime = (seconds: number) => {
@@ -192,22 +173,100 @@ export default function MeetingTranscriptApp() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
   }
 
-  const handleStartRecording = () => {
-    setIsRecording(true)
-    setIsPaused(false)
-    setIsProcessing(true)
-    // Simulate processing delay
-    setTimeout(() => setIsProcessing(false), 2000)
+  const handleStartRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+
+      audioChunksRef.current = []
+      mediaRecorderRef.current.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data)
+      }
+
+      mediaRecorderRef.current.onstop = async () => {
+        setIsProcessing(true); // Start processing state
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const arrayBuffer = await audioBlob.arrayBuffer();
+
+        try {
+          const { success, summary, action_items, transcript: backendTranscript, error } = await window.electronAPI.sendAudioForAnalysis(arrayBuffer);
+
+          if (success) {
+            // Convert backend's single string transcript to TranscriptEntry[]
+            setTranscript(backendTranscript ? [{ id: "1", speaker: "AI", text: backendTranscript, timestamp: formatTime(0), confidence: 1 }] : []);
+            setSummary(summary || null);
+
+            // Map backend's action_items to your new Task interface
+            const mappedTasks: Task[] = action_items?.map((item: any, index: number) => ({
+              id: String(index), // Generate a simple ID
+              title: item.task,
+              assignee: item.owner,
+              priority: "medium", // Default, as backend doesn't provide this
+              completed: false,
+              dueDate: item.deadline === "Not specified" ? undefined : item.deadline,
+            })) || [];
+            setTasks(mappedTasks);
+
+            toast.success("Analysis complete!", {
+              description: "Meeting summary and action items are ready."
+            });
+          } else {
+            console.error("Analysis failed:", error);
+            toast.error(`Analysis failed: ${error}`);
+          }
+        } catch (ipcError: any) {
+          console.error("IPC call failed:", ipcError);
+          toast.error(`Error during analysis: ${ipcError.message}`);
+        } finally {
+          setIsProcessing(false); // End processing state
+        }
+      }
+
+      mediaRecorderRef.current.start()
+      setIsRecording(true)
+      setIsPaused(false) // Ensure not paused when starting
+      setMeetingDuration(0) // Reset duration on new recording
+      setTranscript([]) // Clear previous data
+      setSummary(null)
+      setTasks([])
+
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      intervalRef.current = setInterval(() => {
+        setMeetingDuration((prev) => prev + 1)
+      }, 1000)
+
+      toast.info("Recording started!")
+    } catch (error) {
+      console.error("Error starting recording:", error)
+      toast.error(`Failed to start recording: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   const handleStopRecording = () => {
-    setIsRecording(false)
-    setIsPaused(false)
-    setMeetingDuration(0)
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+      setIsPaused(false) // Ensure not paused when stopping
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+      }
+      toast.info("Recording stopped. Analyzing audio...")
+    }
   }
 
   const handlePauseResume = () => {
-    setIsPaused(!isPaused)
+    if (mediaRecorderRef.current) {
+      if (isPaused) {
+        mediaRecorderRef.current.resume();
+        toast.info("Recording resumed.");
+      } else {
+        mediaRecorderRef.current.pause();
+        toast.info("Recording paused.");
+      }
+      setIsPaused(!isPaused);
+    }
   }
 
   const toggleTaskComplete = (taskId: string) => {
@@ -228,63 +287,69 @@ export default function MeetingTranscriptApp() {
   }
 
   const handleNotionExport = async () => {
+    if (!summary || tasks.length === 0) {
+      toast.error("No summary or action items to export.");
+      return;
+    }
     if (!notionConfig.apiKey || !notionConfig.databaseId) {
-      toast.error("Please configure Notion API key and database")
-      return
+      toast.error("Please configure your Notion API Key and Database ID.");
+      setIsNotionDialogOpen(true); // Open dialog if config is missing
+      return;
     }
 
-    setIsExportingToNotion(true)
-
+    setIsExportingToNotion(true);
     try {
-      // This would call your backend API or Electron IPC to handle Notion export
-      const exportData = {
-        title: notionConfig.pageTitle || `Meeting Summary - ${new Date().toLocaleDateString()}`,
-        summary: summary,
-        tasks: tasks,
-        transcript: transcript,
+      const { success, error, pageId } = await window.electronAPI.exportToNotion(notionConfig, {
+        summary: summary || "", // Ensure summary is a string
+        tasks: tasks, // Pass tasks in their new format
+        transcript: transcript.map(t => t.text).join(" "), // Join transcript entries into a single string
         meetingDuration: formatTime(meetingDuration),
-        participants: summary?.participants || [],
+        participants: [], // Assuming participants are not extracted by current backend, or if they are, you'd populate this.
+      });
+
+      if (success) {
+        toast.success("Meeting data exported to Notion successfully!", {
+          action: pageId ? {
+            label: "View in Notion",
+            onClick: () => window.open(`https://www.notion.so/${pageId.replace(/-/g, "")}`, "_blank"),
+          } : undefined,
+        });
+        setIsNotionDialogOpen(false); // Close dialog on success
+      } else {
+        toast.error(`Notion export failed: ${error}`);
       }
-
-      // Simulate API call - replace with actual implementation
-      await new Promise((resolve) => setTimeout(resolve, 2000))
-
-      // In real implementation, you would call:
-      // await window.electronAPI?.exportToNotion(notionConfig, exportData)
-
-      toast.success("Successfully exported to Notion!", {
-        description: "Meeting summary and tasks have been added to your Notion database.",
-        action: {
-          label: "View in Notion",
-          onClick: () => window.open(`https://notion.so/${notionConfig.databaseId}`, "_blank"),
-        },
-      })
-
-      setIsNotionDialogOpen(false)
-    } catch (error) {
-      toast.error("Failed to export to Notion", {
-        description: "Please check your API key and database configuration.",
-      })
+    } catch (error: any) {
+      toast.error(`Error exporting to Notion: ${error.message}`);
+      console.error("Notion export error:", error);
     } finally {
-      setIsExportingToNotion(false)
+      setIsExportingToNotion(false);
     }
-  }
+  };
+
 
   const fetchNotionDatabases = async () => {
-    if (!notionConfig.apiKey) return
-
-    try {
-      // Simulate fetching databases - replace with actual implementation
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-      setNotionDatabases([
-        { id: "database1", title: "Meeting Notes" },
-        { id: "database2", title: "Project Tasks" },
-        { id: "database3", title: "Team Updates" },
-      ])
-    } catch (error) {
-      toast.error("Failed to fetch Notion databases")
+    if (!notionConfig.apiKey) {
+      toast.error("Please enter your Notion API Key to fetch databases.");
+      setNotionDatabases([]); // Clear previous databases if key is empty
+      return;
     }
-  }
+    try {
+      const { success, databases, error } = await window.electronAPI.fetchNotionDatabases(notionConfig.apiKey);
+      if (success && databases) {
+        setNotionDatabases(databases);
+        toast.success("Notion databases loaded!");
+      } else {
+        toast.error(`Failed to load Notion databases: ${error}`);
+        console.error("Failed to load Notion databases:", error);
+        setNotionDatabases([]);
+      }
+    } catch (error: any) {
+      toast.error(`Error fetching Notion databases: ${error.message}`);
+      console.error("Error fetching Notion databases:", error);
+      setNotionDatabases([]);
+    }
+  };
+
 
   return (
     <div className="min-h-screen relative overflow-hidden">
@@ -448,7 +513,7 @@ export default function MeetingTranscriptApp() {
                               placeholder="secret_..."
                               value={notionConfig.apiKey}
                               onChange={(e) => setNotionConfig((prev) => ({ ...prev, apiKey: e.target.value }))}
-                              onBlur={fetchNotionDatabases}
+                              onBlur={fetchNotionDatabases} // Fetch databases when API key is entered
                             />
                             <p className="text-xs text-muted-foreground">
                               Get your API key from{" "}
@@ -501,11 +566,14 @@ export default function MeetingTranscriptApp() {
                               What will be exported:
                             </h4>
                             <ul className="text-xs text-blue-800 dark:text-blue-200 space-y-1">
-                              <li>• Meeting summary with key points and decisions</li>
+                              <li>• Meeting summary</li>
                               <li>• Action items with assignees and due dates</li>
-                              <li>• Full transcript with timestamps</li>
-                              <li>• Meeting duration and participant list</li>
+                              <li>• Full transcript</li>
+                              <li>• Meeting duration</li>
                             </ul>
+                            <p className="text-xs text-red-600 dark:text-red-400 mt-2">
+                               Note: "Key points", "decisions", and "participants" from your original Summary interface are not currently exported as your backend provides a single string summary.
+                            </p>
                           </div>
                         </div>
 
@@ -515,7 +583,7 @@ export default function MeetingTranscriptApp() {
                           </Button>
                           <Button
                             onClick={handleNotionExport}
-                            disabled={!notionConfig.apiKey || !notionConfig.databaseId || isExportingToNotion}
+                            disabled={!notionConfig.apiKey || !notionConfig.databaseId || isExportingToNotion || !summary}
                             className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700"
                           >
                             {isExportingToNotion ? (
@@ -542,7 +610,7 @@ export default function MeetingTranscriptApp() {
                       <Zap className="h-4 w-4 animate-pulse" />
                       Processing with AI...
                     </div>
-                    <Progress value={65} className="h-2" />
+                    <Progress value={65} className="h-2" /> {/* Placeholder progress */}
                   </div>
                 )}
               </CardContent>
@@ -570,209 +638,138 @@ export default function MeetingTranscriptApp() {
                   <CardHeader>
                     <CardTitle className="flex items-center space-x-2">
                       <FileText className="h-5 w-5" />
-                      <span>Live Transcript</span>
+                      Full Transcript
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <ScrollArea className="h-96" ref={scrollRef}>
-                      <div className="space-y-4">
-                        {transcript.map((entry) => (
-                          <div key={entry.id} className="flex space-x-3">
-                            <div className="flex-shrink-0">
-                              <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white text-xs font-medium">
-                                {entry.speaker
-                                  .split(" ")
-                                  .map((n) => n[0])
-                                  .join("")}
-                              </div>
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center space-x-2 mb-1">
-                                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{entry.speaker}</p>
-                                <span className="text-xs text-muted-foreground">{entry.timestamp}</span>
-                                <Badge variant="outline" className="text-xs">
-                                  {Math.round(entry.confidence * 100)}%
-                                </Badge>
-                              </div>
-                              <p className="text-sm text-gray-700 dark:text-gray-300">{entry.text}</p>
-                            </div>
+                    <ScrollArea ref={scrollRef} className="h-[400px] pr-4">
+                      {transcript.length > 0 ? (
+                        transcript.map((entry) => (
+                          <div key={entry.id} className="mb-2 text-sm leading-relaxed">
+                            <span className="font-semibold text-primary">[{entry.timestamp}] {entry.speaker}:</span>{" "}
+                            {entry.text}
                           </div>
-                        ))}
-                      </div>
+                        ))
+                      ) : (
+                        <p className="text-muted-foreground text-center py-10">
+                          Start recording to see the live transcript here.
+                        </p>
+                      )}
                     </ScrollArea>
                   </CardContent>
                 </Card>
               </TabsContent>
 
               <TabsContent value="summary" className="mt-6">
-                <div className="space-y-6">
-                  {summary && (
-                    <>
-                      <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
-                        <CardHeader>
-                          <CardTitle className="flex items-center space-x-2">
-                            <Brain className="h-5 w-5 text-blue-600" />
-                            <span>Key Points</span>
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                          <ul className="space-y-2">
-                            {summary.keyPoints.map((point, index) => (
-                              <li key={index} className="flex items-start space-x-2">
-                                <div className="w-2 h-2 bg-blue-600 rounded-full mt-2 flex-shrink-0" />
-                                <span className="text-sm">{point}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </CardContent>
-                      </Card>
-
-                      <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
-                        <CardHeader>
-                          <CardTitle className="flex items-center space-x-2">
-                            <CheckCircle2 className="h-5 w-5 text-green-600" />
-                            <span>Decisions Made</span>
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                          <ul className="space-y-2">
-                            {summary.decisions.map((decision, index) => (
-                              <li key={index} className="flex items-start space-x-2">
-                                <CheckCircle2 className="w-4 h-4 text-green-600 mt-0.5 flex-shrink-0" />
-                                <span className="text-sm">{decision}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </CardContent>
-                      </Card>
-
-                      <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
-                        <CardHeader>
-                          <CardTitle className="flex items-center space-x-2">
-                            <Clock className="h-5 w-5 text-orange-600" />
-                            <span>Next Steps</span>
-                          </CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                          <ul className="space-y-2">
-                            {summary.nextSteps.map((step, index) => (
-                              <li key={index} className="flex items-start space-x-2">
-                                <div className="w-2 h-2 bg-orange-600 rounded-full mt-2 flex-shrink-0" />
-                                <span className="text-sm">{step}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </CardContent>
-                      </Card>
-                    </>
-                  )}
-                </div>
+                <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
+                  <CardHeader>
+                    <CardTitle className="flex items-center space-x-2">
+                      <Brain className="h-5 w-5" />
+                      AI Summary
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {summary ? (
+                      <div className="space-y-3">
+                        <p className="text-sm leading-relaxed">{summary}</p>
+                        {/* If backend provided structured data, you would map it here */}
+                        {/* {summary.keyPoints && summary.keyPoints.length > 0 && (
+                          <div>
+                            <h3 className="font-semibold text-base mb-1">Key Points:</h3>
+                            <ul className="list-disc list-inside text-sm space-y-1">
+                              {summary.keyPoints.map((point, i) => (
+                                <li key={i}>{point}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )} */}
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground text-center py-10">
+                        Summary will appear after recording stops and analysis is complete.
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
               </TabsContent>
 
               <TabsContent value="tasks" className="mt-6">
                 <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
                   <CardHeader>
-                    <CardTitle className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2">
-                        <CheckCircle2 className="h-5 w-5" />
-                        <span>Action Items</span>
-                      </div>
-                      <Badge variant="secondary">{tasks.filter((t) => !t.completed).length} pending</Badge>
+                    <CardTitle className="flex items-center space-x-2">
+                      <Zap className="h-5 w-5" />
+                      Action Items
+                      <Badge variant="secondary" className="ml-2">
+                        {tasks.filter((t) => !t.completed).length} pending
+                      </Badge>
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="space-y-4">
-                      {tasks.map((task) => (
-                        <div
-                          key={task.id}
-                          className="flex items-center space-x-3 p-3 rounded-lg border bg-white/40 dark:bg-slate-700/40"
-                        >
-                          <button onClick={() => toggleTaskComplete(task.id)} className="flex-shrink-0">
-                            {task.completed ? (
-                              <CheckCircle2 className="w-5 h-5 text-green-600" />
-                            ) : (
-                              <Circle className="w-5 h-5 text-gray-400" />
-                            )}
-                          </button>
-                          <div className="flex-1 min-w-0">
-                            <p
-                              className={`text-sm font-medium ${task.completed ? "line-through text-muted-foreground" : ""}`}
+                    <ScrollArea className="h-[400px] pr-4">
+                      {tasks.length > 0 ? (
+                        <div className="space-y-3">
+                          {tasks.map((task) => (
+                            <div
+                              key={task.id}
+                              className="flex items-start p-3 border rounded-lg bg-background hover:bg-muted/50 transition-colors cursor-pointer"
+                              onClick={() => toggleTaskComplete(task.id)}
                             >
-                              {task.title}
-                            </p>
-                            <div className="flex items-center space-x-2 mt-1">
-                              <span className="text-xs text-muted-foreground">Assigned to: {task.assignee}</span>
-                              {task.dueDate && (
-                                <span className="text-xs text-muted-foreground">Due: {task.dueDate}</span>
-                              )}
+                              <div className="mr-3 mt-1">
+                                {task.completed ? (
+                                  <CheckCircle2 className="h-5 w-5 text-green-500" />
+                                ) : (
+                                  <Circle className="h-5 w-5 text-gray-400" />
+                                )}
+                              </div>
+                              <div className="flex-1">
+                                <p className={`text-sm font-medium ${task.completed ? "line-through text-muted-foreground" : ""}`}>
+                                  {task.title}
+                                </p>
+                                <div className="flex items-center text-xs text-muted-foreground mt-1 space-x-3">
+                                  {task.assignee && (
+                                    <span className="flex items-center">
+                                      <Users className="h-3 w-3 mr-1" /> {task.assignee}
+                                    </span>
+                                  )}
+                                  {task.dueDate && (
+                                    <span className="flex items-center">
+                                      <Clock className="h-3 w-3 mr-1" /> {task.dueDate}
+                                    </span>
+                                  )}
+                                  {task.priority && (
+                                    <Badge style={{ backgroundColor: getPriorityColor(task.priority) }} className="text-white">
+                                      {task.priority.charAt(0).toUpperCase() + task.priority.slice(1)}
+                                    </Badge>
+                                  )}
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                          <div className={`w-2 h-2 rounded-full ${getPriorityColor(task.priority)}`} />
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                      ) : (
+                        <p className="text-muted-foreground text-center py-10">
+                          No action items identified yet.
+                        </p>
+                      )}
+                    </ScrollArea>
                   </CardContent>
                 </Card>
               </TabsContent>
             </Tabs>
           </div>
 
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Meeting Info */}
-            <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
-              <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <Users className="h-5 w-5" />
-                  <span>Meeting Info</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <p className="text-sm font-medium">Participants</p>
-                  <div className="mt-2 space-y-2">
-                    {summary?.participants.map((participant, index) => (
-                      <div key={index} className="flex items-center space-x-2">
-                        <div className="w-6 h-6 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white text-xs font-medium">
-                          {participant
-                            .split(" ")
-                            .map((n) => n[0])
-                            .join("")}
-                        </div>
-                        <span className="text-sm">{participant}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <Separator />
-                <div>
-                  <p className="text-sm font-medium">Status</p>
-                  <div className="mt-2 flex items-center space-x-2">
-                    <div
-                      className={`w-2 h-2 rounded-full ${isRecording ? "bg-red-500 animate-pulse" : "bg-gray-400"}`}
-                    />
-                    <span className="text-sm text-muted-foreground">
-                      {isRecording ? (isPaused ? "Paused" : "Recording") : "Stopped"}
-                    </span>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Quick Stats */}
+          {/* Right Column: Quick Stats */}
+          <div className="lg:col-span-1 space-y-6">
             <Card className="shadow-lg border-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm card-hover glass-enhanced">
               <CardHeader>
                 <CardTitle>Quick Stats</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Words spoken</span>
-                  <span className="font-medium">1,247</span>
+                  <span className="text-sm text-muted-foreground">Meeting duration</span>
+                  <span className="font-medium">{formatTime(meetingDuration)}</span>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Key points</span>
-                  <span className="font-medium">{summary?.keyPoints.length || 0}</span>
-                </div>
+                {/* Note: "Words spoken" and "Key points" are based on mock data and not directly from your current backend analysis output. */}
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">Action items</span>
                   <span className="font-medium">{tasks.length}</span>
