@@ -74,6 +74,17 @@
   -webkit-app-region: drag;
 }
 
+/* Hide scrollbar for Chrome, Safari and Opera */
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+/* Hide scrollbar for IE, Edge and Firefox */
+.no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+}
+
 /* Hide scrollbar but keep scroll functionality */
 
 
@@ -104,35 +115,15 @@
 }
 
 /* Show scrollbar on hover */
-.scrollbar-hover::-webkit-scrollbar {
-  width: 6px;
-  display: none;
-}
 
-.scrollbar-hover:hover::-webkit-scrollbar {
-  display: block;
-}
-
-.scrollbar-hover::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.scrollbar-hover::-webkit-scrollbar-thumb {
-  background-color: rgba(150, 150, 150, 0.5);
-  border-radius: 4px;
-}
-
-.scrollbar-hover {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: thin;     /* Firefox */
-}
 
 
 @layer base {
   * {
     @apply border-border;
   }
-  body {
+  html, body {
+    height: 100%;
     @apply bg-background text-foreground;
   }
 }

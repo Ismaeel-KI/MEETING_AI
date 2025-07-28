@@ -74,23 +74,7 @@ interface Task {
 // }
 
 // Extend the Window interface to include electronAPI
-declare global {
-  interface Window {
-    electronAPI: {
-      minimize: () => void
-      maximize: () => void
-      close: () => void
-      startTranscriptCapture: () => Promise<{ success: boolean }>
-      stopTranscriptCapture: () => Promise<{ success: boolean }>
-      sendAudioForAnalysis: (arrayBuffer: ArrayBuffer) => Promise<{ success: boolean; summary?: string; action_items?: any[]; transcript?: string; error?: string }>;
-      processAISummary: (transcript: string) => Promise<{ success: boolean; summary?: string; action_items?: any[]; transcript?: string; error?: string }>;
-      exportToNotion: (config: { apiKey: string; databaseId: string; pageTitle?: string; }, data: { summary: string; tasks: Task[]; transcript: string; meetingDuration?: string; participants?: string[] }) => Promise<{ success: boolean; pageId?: string; error?: string }>;
-      fetchNotionDatabases: (apiKey: string) => Promise<{ success: boolean; databases?: { id: string; title: string }[]; error?: string }>;
-      onTranscriptUpdate: (callback: (event: Electron.IpcRendererEvent, transcript: TranscriptEntry[]) => void) => void;
-      onMeetingStatusChange: (callback: (event: Electron.IpcRendererEvent, status: string) => void) => void;
-    }
-  }
-}
+
 
 export default function MeetingTranscriptApp() {
   const { theme, setTheme } = useTheme()
@@ -154,15 +138,20 @@ export default function MeetingTranscriptApp() {
 
   // Meeting timer
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null; // Initialize to null
     if (isRecording && !isPaused) {
-      interval = setInterval(() => {
+      intervalRef.current = setInterval(() => {
         setMeetingDuration((prev) => prev + 1)
       }, 1000)
+    } else {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
     }
     return () => {
-      if (interval) { // Clear if interval exists
-        clearInterval(interval);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     }
   }, [isRecording, isPaused])
@@ -189,7 +178,7 @@ export default function MeetingTranscriptApp() {
         const arrayBuffer = await audioBlob.arrayBuffer();
 
         try {
-          const { success, summary, action_items, transcript: backendTranscript, error } = await window.electronAPI.sendAudioForAnalysis(arrayBuffer);
+          const { success, summary = "", action_items = [], transcript: backendTranscript = "", error } = await window.electronAPI.sendAudioForAnalysis(arrayBuffer);
 
           if (success) {
             // Convert backend's single string transcript to TranscriptEntry[]
@@ -230,12 +219,7 @@ export default function MeetingTranscriptApp() {
       setSummary(null)
       setTasks([])
 
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      intervalRef.current = setInterval(() => {
-        setMeetingDuration((prev) => prev + 1)
-      }, 1000)
+      
 
       toast.info("Recording started!")
     } catch (error) {
@@ -705,7 +689,7 @@ export default function MeetingTranscriptApp() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <ScrollArea className="h-[400px] pr-4">
+                    <ScrollArea className="h-[400px] pr-4 scrollbar-hover">
                       {tasks.length > 0 ? (
                         <div className="space-y-3">
                           {tasks.map((task) => (

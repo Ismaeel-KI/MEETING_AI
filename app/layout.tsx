@@ -22,7 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>  
       <body className={inter.className}>
-        <div className="overflow-y-scroll scrollbar-hover">
+        <div className="h-screen overflow-y-auto no-scrollbar">
           <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
 
             <Titlebar />
